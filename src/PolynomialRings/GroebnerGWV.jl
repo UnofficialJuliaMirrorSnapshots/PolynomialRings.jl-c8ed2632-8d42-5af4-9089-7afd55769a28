@@ -12,9 +12,10 @@ import ..Modules: AbstractModuleElement, modulebasering
 import ..Modules: withtransformations, separatetransformation
 import ..MonomialOrderings: MonomialOrder, @withmonomialorder
 import ..Monomials: total_degree, any_divisor
-import ..Operators: Lead, Full, content
+import ..Operators: Lead, Full, content, integral_fraction
 import ..Polynomials: Polynomial, monomialorder, monomialtype, PolynomialBy
 import ..Terms: monomial, coefficient
+import ..Util: @showprogress
 import PolynomialRings: gröbner_basis, gröbner_transformation, xrem!
 import PolynomialRings: leading_term, leading_monomial, lcm_multipliers, lcm_degree, fraction_field, basering, base_extend, base_restrict
 import PolynomialRings: maybe_div, termtype, monomialtype, leading_row, leading_coefficient
@@ -70,6 +71,11 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
 
     if with_transformation
         polynomials = withtransformations(polynomials)
+    else
+        polynomials = map(polynomials) do f
+            f, n = integral_fraction(f)
+            f
+        end
     end
 
     # experimentally, it seems much better to sort in
@@ -91,7 +97,7 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
     JP = SortedDict{Signature, MM}(order)
 
     n = length(polynomials)
-    for (i,p) in enumerate(polynomials)
+    @showprogress "Gröbner: preparing inputs" for (i,p) in enumerate(polynomials)
         T = leading_monomial( sparsevec(Dict(i=>one(R)), n) )
         m = (T, p)
         if T ∈ keys(JP)
@@ -104,29 +110,8 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
         end
     end
 
-    loops = 0
-    considered = 0
-    divisors_considered = 0
-    divisor_considerations = 0
-    progress_logged = false
     # step 3
-    while !isempty(JP)
-        loops += 1
-        if loops % 100 == 0
-            l = length(G)
-            k = length(JP)
-            h = sum(length, values(H))
-            @info("GWV progress update:",
-                loops,
-                J_pairs_considered = considered,
-                length(JP),
-                length_H = sum(length, values(H)),
-                divisor_considerations,
-                avg_divisors_considered = round(divisors_considered/divisor_considerations, digits=1),
-            )
-            progress_logged = true
-        end
-
+    @showprogress "Computing Gröbner basis: " while !isempty(JP)
         # step 1.
         sig, m = first(JP)
         delete!(JP, sig)
@@ -165,8 +150,7 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
             elseif status == :notsupertopreducible
                 # i) Add the leading terms of the principle syzygies, vT j − v j T for
                 # 1 ≤ j ≤ |U |, to H,
-                if M <: Polynomial # TODO: I don't understand what the equivalent of
-                                   # this syzygy should be in the case of modules.
+                if M <: Polynomial # this syzygy does not exist in the case of modules.
                     for (Tj, vj) in G
                         # syzygy = v*Tj - vj*T
                         lhs = leading_monomial(v)*Tj
@@ -197,9 +181,7 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
                             Jsig = lhs
                             Jpair = (t1*T, t1*v)
                         end
-                        divisor_considerations += 1
                         if !any_divisor(Jsig.m) do d
-                            divisors_considered += 1
                             d in H[Jsig.i]
                         end
                             # (storing only one J-pair for each distinct signature
@@ -222,17 +204,14 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
                 @assert false "Didn't expect $status"
             end
         end
-
-        considered += 1
     end
 
     # --------------------------------------------------------------------------
     # Interreduce the result
     # --------------------------------------------------------------------------
     result = getindex.(G, 2)
-    progress_logged && @info("Main loop done; interreducing the result polynomials", length(result))
     k = length(result)
-    for i in 1:k
+    @showprogress "Interreducing result" for i in 1:k
         xrem!(result[i], result[[1:i-1; i+1:k]], order=order)
         if basering(modulebasering(eltype(result))) <: Integer
             result[i] ÷= content(result[i])
@@ -241,7 +220,6 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
     # what we filter out is probably a Gröbner basis for the syzygies, and
     # maybe the caller wants to have it?
     filter!(!iszero, result)
-    progress_logged && @info("Done. Returning a Gröbner basis", length(result))
     # --------------------------------------------------------------------------
     # Return the result
     # --------------------------------------------------------------------------
@@ -255,7 +233,7 @@ function gwv(order::MonomialOrder, polynomials::AbstractVector{M}; with_transfor
     end
 end
 
-function gröbner_basis(::GWV, o::MonomialOrder, G::AbstractArray{<:AbstractModuleElement}; kwds...)
+function gröbner_basis(::GWV, o::MonomialOrder, G::AbstractVector{<:AbstractModuleElement}; kwds...)
     # GWV chokes on empty arrays mainly because it tries to modify the input
     # array a few times (restrict to integers, possibly add the transformation)
     # so lets short-circuit that case.
@@ -263,7 +241,7 @@ function gröbner_basis(::GWV, o::MonomialOrder, G::AbstractArray{<:AbstractModu
     return gwv(o, G, with_transformation=false, kwds...)
 end
 
-function gröbner_transformation(::GWV, o::MonomialOrder, G::AbstractArray{<:AbstractModuleElement}; kwds...)
+function gröbner_transformation(::GWV, o::MonomialOrder, G::AbstractVector{<:AbstractModuleElement}; kwds...)
     # GWV chokes on empty arrays mainly because it tries to modify the input
     # array a few times (restrict to integers, possibly add the transformation)
     # so lets short-circuit that case.

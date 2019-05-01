@@ -22,6 +22,7 @@ function variablesymbols end
 function allvariablesymbols end
 function iscanonical end
 function canonicaltype end
+function polynomialtype end
 
 base_extend(A::Type, B::Type)   = promote_type(A, B)
 base_restrict(A::Type, B::Type) = B
@@ -46,12 +47,13 @@ allvariablesymbols(::Type) = Set()
 # Polynomial/term/monomial operations
 #
 # -----------------------------------------------------------------------------
-function terms end
+function nzterms end
 function leading_term end
 function leading_monomial end
 function leading_coefficient end
 function leading_row end
 function maybe_div end
+function divides end
 function lcm_multipliers end
 function lcm_degree end
 function leaddiv end

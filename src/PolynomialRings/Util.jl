@@ -5,9 +5,12 @@ import Base: iterate
 import Base: length, isempty
 import Base: length, iterate
 import Base: filter, filter!
+import Base: pairs
 
 import DataStructures: PriorityQueue, SortedSet
 import DataStructures: percolate_down!, percolate_up!, enqueue!, dequeue!, peek
+import ProgressMeter
+import ProgressMeter: Progress, next!, finish!
 
 # -----------------------------------------------------------------------------
 #
@@ -84,6 +87,13 @@ function filter!(f::Function, s::SortedSet)
     return s
 end
 filter(f::Function, s::SortedSet) = filter!(f, copy(s))
+
+# -----------------------------------------------------------------------------
+#
+# speed up iteration over pairs(::PriorityQueue)
+#
+# -----------------------------------------------------------------------------
+pairs(x::PriorityQueue) = x.xs
 
 # -----------------------------------------------------------------------------
 #
@@ -187,5 +197,37 @@ end
 end
 
 isstrictlysorted(itr; lt) = issorted(itr; lt = (a, b) -> !lt(b, a))
+
+# -----------------------------------------------------------------------------
+#
+# Utility for showing progress on Gröbner basis computations
+#
+# -----------------------------------------------------------------------------
+macro showprogress(desc, expr)
+    ourpattern = expr.head == :while && expr.args[1].head == :call &&
+        expr.args[1].args[1] == :! && expr.args[1].args[2].head == :call &&
+        expr.args[1].args[2].args[1] == :isempty
+    if !ourpattern
+        return esc(:(
+            $ProgressMeter.@showprogress $desc $expr
+        ))
+    end
+    P = expr.args[1].args[2].args[2]
+    condition = expr.args[1]
+    body = expr.args[2]
+
+    quote
+        progress = $Progress($length($(esc(P))), $desc)
+        loops = 0
+        while $(esc(condition))
+            $(esc(body))
+
+            loops += 1
+            progress.n = $length($(esc(P))) + loops
+            $next!(progress)
+        end
+        $finish!(progress)
+    end
+end
 
 end

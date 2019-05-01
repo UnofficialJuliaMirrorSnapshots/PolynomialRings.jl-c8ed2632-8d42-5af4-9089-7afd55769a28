@@ -1,32 +1,53 @@
 module Modules
 
 import Base: *, +, -, ÷
-import Base: iszero, div, rem, divrem, *, ==
-import Base: keytype
+import Base: iszero, zero, div, rem, divrem, *, ==
+import Base: keytype, hash, lcm
 import LinearAlgebra: mul!
-import SparseArrays: SparseVector, sparsevec, spzeros
+import SparseArrays: AbstractSparseArray, SparseVector, sparsevec, spzeros, nonzeros
+
+import InPlace: @inplace, inclusiveinplace!
 
 import ..MonomialOrderings: MonomialOrder, @withmonomialorder
 import ..Monomials: AbstractMonomial
 import ..Monomials: total_degree
 import ..Operators: RedType, Lead, Full, Tail
 import ..Operators: one_step_div!, one_step_xdiv!, content, integral_fraction
-import ..Polynomials: Polynomial, monomialorder, basering
+import ..Polynomials: Polynomial, monomialorder, basering, tail
+import ..Polynomials: nzterms, nzrevterms, nztailterms
 import ..Terms: Term
 import ..Terms: coefficient, monomial
 import PolynomialRings: leaddiv, leadrem, leaddivrem
 import PolynomialRings: leading_row, leading_term, leading_monomial, leading_coefficient, base_extend
-import PolynomialRings: maybe_div, lcm_degree, lcm_multipliers
+import PolynomialRings: maybe_div, divides, lcm_degree, lcm_multipliers
 import PolynomialRings: termtype, monomialtype
 
 # This should probably be in Base; see
 # https://github.com/JuliaLang/julia/pull/27749
 if VERSION < v"1.2-"
-    keytype(a::AbstractArray) = CartesianIndex{ndims(a)}
-    keytype(a::AbstractVector) = Int
+    keytype(a::AbstractArray) = keytype(typeof(a))
+    keytype(T::Type{<:AbstractArray}) = CartesianIndex{ndims(T)}
+    keytype(::Type{<:AbstractVector}) = Int
 end
 
-iszero(x::AbstractArray{P}) where P<:Polynomial = all(iszero, x)
+iszero(x::SparseVector{<:Polynomial}) = all(iszero, nonzeros(x))
+"""
+    iszero(x::AbstractArray{<:Polynomial}, ix)
+
+Return true if iszero(x[ix]). In the case of sparse arrays, this
+is faster than iszero(x[xi]) because a new zero(eltype(x)) does
+not need to be allocated.
+"""
+iszero(x::AbstractArray{<:Polynomial}, ix) = iszero(x[ix])
+function iszero(x::SparseVector{<:Polynomial}, ix::Integer)
+    r = searchsorted(x.nzind, ix)
+    return isempty(r) || iszero(x.nzval[first(r)])
+end
+
+
+# see https://github.com/JuliaLang/julia/issues/31835
+zero(a::AbstractArray{<:Polynomial}) = map(_ -> zero(eltype(a)), a)
+zero(a::AbstractSparseArray{<:Polynomial}) = spzeros(eltype(a), size(a)...)
 
 base_extend(x::AbstractArray{P}, ::Type{C}) where P<:Polynomial where C = map(p->base_extend(p,C), x)
 base_extend(x::AbstractArray{P})            where P<:Polynomial         = map(base_extend, x)
@@ -53,8 +74,10 @@ monomialtype(p::Type{<:AbstractArray{<:Polynomial}}) = Signature{monomialtype(el
 *(s::Signature,m::Union{AbstractMonomial,Term,Number})  = Signature(s.i, s.m * m)
 *(m::Union{AbstractMonomial,Term,Number}, s::Signature) = Signature(s.i, s.m * m)
 maybe_div(s::Signature, t::Signature)            = s.i == t.i ? maybe_div(s.m, t.m) : nothing
+divides(s::Signature, t::Signature)              = s.i == t.i && divides(s.m, t.m)
 lcm_degree(s::Signature, t::Signature)           = s.i == t.i ? lcm_degree(s.m, t.m) : nothing
 lcm_multipliers(s::Signature, t::Signature)      = s.i == t.i ? lcm_multipliers(s.m, t.m) : nothing
+lcm(s::Signature, t::Signature)                  = s.i == t.i ? Signature(s.i, lcm(s.m, t.m)) : nothing
 total_degree(s::Signature)                       = total_degree(s.m)
 Base.Order.lt(o::MonomialOrder, s::Signature, t::Signature) = s.i > t.i || (s.i == t.i && Base.Order.lt(o, s.m, t.m))
 ==(s::S, t::S) where S <: Signature = s.i == t.i && s.m == t.m
@@ -63,10 +86,25 @@ iszero(s::Signature{<:Term}) = iszero(s.m)
 coefficient(s::Signature{<:Term}) = coefficient(s.m)
 monomial(s::Signature{<:Term}) = Signature(s.i, monomial(s.m))
 
+hash(s::Signature, h::UInt) = hash(s.i, hash(s.m, h))
 
 leading_row(x::AbstractArray{<:Polynomial}) = findfirst(!iszero, x)
-leading_term(x::AbstractArray{P}; order::MonomialOrder=monomialorder(x)) where P<:Polynomial = Signature(leading_row(x), leading_term(x[leading_row(x)], order=order))
-leading_monomial(x::AbstractArray{P}; order::MonomialOrder=monomialorder(x)) where P<:Polynomial = Signature(leading_row(x), leading_monomial(x[leading_row(x)], order=order))
+
+function leading_row(x::SparseVector{<:Polynomial})
+    n = findfirst(!iszero, x.nzval)
+    return x.nzind[n]
+end
+
+function leading_term(x::AbstractArray{P}; order::MonomialOrder=monomialorder(x)) where P<:Polynomial
+    ix = leading_row(x)
+    return Signature(ix, leading_term(x[ix], order=order))
+end
+
+function leading_monomial(x::AbstractArray{P}; order::MonomialOrder=monomialorder(x)) where P<:Polynomial
+    ix = leading_row(x)
+    return Signature(ix, leading_monomial(x[ix], order=order))
+end
+
 leading_coefficient(x::AbstractArray{P}; order::MonomialOrder=monomialorder(x)) where P<:Polynomial = leading_coefficient(x[leading_row(x)], order=order)
 
 function Base.Order.lt(order::MonomialOrder, s::A, t::A) where A<:AbstractArray{P} where P<:Polynomial
@@ -75,8 +113,19 @@ function Base.Order.lt(order::MonomialOrder, s::A, t::A) where A<:AbstractArray{
     Base.Order.lt(order, leading_monomial(s, order=order), leading_monomial(t, order=order))
 end
 
+Base.getindex(a::AbstractArray{<:Polynomial}, s::Signature{<:AbstractMonomial}) = a[s.i][s.m]
+function Base.getindex(a::SparseVector{<:Polynomial}, s::Signature{<:AbstractMonomial})
+    ixrange = searchsorted(a.nzind, s.i)
+    if isempty(ixrange)
+        return zero(modulebasering(a))
+    else
+        return a.nzval[ixrange[1]][s.m]
+    end
+end
+
 function one_step_div!(a::A, b::A; order::MonomialOrder, redtype::RedType) where A<:AbstractArray{<:Polynomial}
     @withmonomialorder order
+    @assert size(a) == size(b)
     i = findfirst(!iszero, b)
     if i !== nothing && !iszero(a[i])
         lt_a = leading_term(a[i])
@@ -84,12 +133,11 @@ function one_step_div!(a::A, b::A; order::MonomialOrder, redtype::RedType) where
         factor = maybe_div(lt_a, lt_b)
         if factor !== nothing
             for i in eachindex(a)
-                a[i] -= factor * b[i]
-                #if iszero(a[i]) # possibly a sparse zero, so don't try in-place
-                #    a[i] -= factor * b[i]
-                #else
-                #    @. a[i] -= factor * b[i]
-                #end
+                if iszero(a[i]) # possibly a sparse zero, so don't try in-place
+                    a[i] -= factor * b[i]
+                else
+                    @. a[i] -= factor * b[i]
+                end
             end
         end
         return factor
@@ -100,6 +148,7 @@ end
 
 function one_step_xdiv!(a::A, b::A; order::MonomialOrder, redtype::RedType) where A<:AbstractArray{<:Polynomial}
     @withmonomialorder order
+    @assert size(a) == size(b)
     i = findfirst(!iszero, b)
     if i !== nothing && !iszero(a[i])
         lt_a = leading_monomial(a[i])
@@ -139,6 +188,52 @@ leading_row(x::Polynomial) = 1
 
 # Work around sparse-dense multiplication in Base only working for eltype() <: Number
 mul!(A, B, C, α::Polynomial, β::Polynomial) = mul!(A, B, C, convert(basering(α),α), convert(basering(β), β))
+
+nzterms(x::AbstractArray{<:Polynomial}; order) = (
+    Signature(ix, t)
+    for (ix, x_i) in Iterators.reverse(enumerate(x))
+    for t in nzterms(x_i, order=order)
+)
+
+nzrevterms(x::AbstractArray{<:Polynomial}; order) = (
+    Signature(ix, t)
+    for (ix, x_i) in enumerate(x)
+    for t in nzrevterms(x_i, order=order)
+)
+
+nzterms(x::SparseVector{<:Polynomial}; order) = (
+    Signature(ix, t)
+    for (ix, x_i) in Iterators.reverse(zip(x.nzind, x.nzval))
+    for t in nzterms(x_i, order=order)
+)
+
+nzrevterms(x::SparseVector{<:Polynomial}; order) = (
+    Signature(ix, t)
+    for (ix, x_i) in zip(x.nzind, x.nzval)
+    for t in nzrevterms(x_i, order=order)
+)
+
+function tail(x::AbstractArray{<:Polynomial}; order)
+    res = deepcopy(x)
+    ix = leading_row(x)
+    res[ix] = tail(res[ix]; order=order)
+    return res
+end
+
+function +(x::AbstractArray{<:Polynomial}, s::Signature)
+    res = deepcopy(x)
+    @inplace res[s.i] += s.m
+end
+
+function -(x::AbstractArray{<:Polynomial}, s::Signature)
+    res = deepcopy(x)
+    @inplace res[s.i] -= s.m
+end
+
+function inclusiveinplace!(op::Union{typeof(+), typeof(-)}, x::AbstractArray{<:Polynomial}, s::Signature)
+    x[s.i] = inclusiveinplace!(op, x[s.i], s.m)
+    x
+end
 
 """
 
