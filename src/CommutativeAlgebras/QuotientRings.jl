@@ -223,4 +223,10 @@ function convert(::Type{P}, a::Q) where P <: PolynomialOver{Q} where Q <: Quotie
         return P(M[one(M)], Q[deepcopy(a)])
     end
 end
+
+*(a::P, b::Q) where P <: PolynomialOver{Q} where Q <: QuotientRing = invoke(*, Tuple{PolynomialOver{C}, C} where C, a, b)
+*(a::Q, b::P) where P <: PolynomialOver{Q} where Q <: QuotientRing = invoke(*, Tuple{C, PolynomialOver{C}} where C, a, b)
+
+Base.Broadcast.broadcastable(q::QuotientRing) = Ref(q)
+
 end

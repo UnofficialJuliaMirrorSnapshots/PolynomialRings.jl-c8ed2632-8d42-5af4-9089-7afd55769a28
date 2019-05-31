@@ -12,6 +12,7 @@ import ..Polynomials:  NamedMonomial, NumberedMonomial, NamedTerm, NumberedTerm,
 import ..Polynomials: Polynomial, PolynomialOver, NamedPolynomial, NumberedPolynomial, PolynomialBy, PolynomialIn, nzterms
 import ..Terms: Term, basering, monomial, coefficient
 import PolynomialRings: termtype, namingscheme, variablesymbols, exptype, monomialtype, allvariablesymbols, iscanonical, canonicaltype, fullnamingscheme, fullboundnames, max_variable_index, polynomialtype
+import PolynomialRings: expansion
 
 # -----------------------------------------------------------------------------
 #
@@ -76,8 +77,8 @@ _lossy_convert_monomial(::Type{One}, ::AbstractMonomial) = One()
             if d == s
                 # HOWEVER, if it actually also exists in src, then replace the 0
                 # by reading from exponent_tuple
-                converter.args[end]= :( monomial[$j] )
-                push!(degree.args,:( monomial[$j] ))
+                converter.args[end]= :( exponent(monomial, $j) )
+                push!(degree.args,:( exponent(monomial, $j) ))
                 break
             end
         end
@@ -88,7 +89,7 @@ end
 # workaround for the @generated body needing to be pure (no closures)
 _indexer(monomial) = i ->
                      i <= num_variables(typeof(monomial)) ?
-                     monomial[i] :
+                     exponent(monomial, i) :
                      zero(exptype(monomial))
 
 @generated function _lossy_convert_monomial(::Type{M1}, monomial::M2) where {M1 <: NumberedMonomial, M2 <: NumberedMonomial}
@@ -234,7 +235,7 @@ function convert(::Type{P1}, a::P2) where P1 <: Polynomial where P2 <: Polynomia
     C = basering(P1)
     monomials = M[]
     coeffs = C[]
-    for (c, (m,)) in PolynomialRings.Expansions._expansion2(a, monomialorder(P1))
+    for (m, c) in expansion(a, monomialorder(P1))
         push!(monomials, m)
         push!(coeffs, c)
     end

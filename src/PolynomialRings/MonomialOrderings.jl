@@ -49,8 +49,8 @@ function Base.Order.lt(::MonomialOrder{:degrevlex}, a::M,b::M) where M <: Abstra
 
     if total_degree(a) == total_degree(b)
         for i in rev_index_union(a,b)
-            if a[i] != b[i]
-                return a[i] > b[i]
+            if exponent(a, i) != exponent(b, i)
+                return exponent(a, i) > exponent(b, i)
             end
         end
         return false
@@ -63,8 +63,8 @@ function Base.Order.lt(::MonomialOrder{:deglex}, a::M,b::M) where M <: AbstractM
 
     if total_degree(a) == total_degree(b)
         for i in index_union(a,b)
-            if a[i] != b[i]
-                return a[i] < b[i]
+            if exponent(a, i) != exponent(b, i)
+                return exponent(a, i) < exponent(b, i)
             end
         end
         return false
@@ -75,8 +75,8 @@ end
 
 function Base.Order.lt(::MonomialOrder{:lex}, a::M,b::M) where M <: AbstractMonomial
     for i in index_union(a,b)
-        if a[i] != b[i]
-            return a[i] < b[i]
+        if exponent(a, i) != exponent(b, i)
+            return exponent(a, i) < exponent(b, i)
         end
     end
     return false
@@ -88,15 +88,15 @@ end
 function Base.Order.lt(m::MonomialOrder, a::T, b::T) where T <: Tuple
     for i = 1:fieldcount(T)
         if fieldtype(T,i) <: AbstractMonomial
-            if Base.Order.lt(m, a[i], b[i])
+            if Base.Order.lt(m, exponent(a, i), exponent(b, i))
                 return true
-            elseif Base.Order.lt(m, b[i], a[i])
+            elseif Base.Order.lt(m, exponent(b, i), exponent(a, i))
                 return false
             end
         else
-            if isless(a[i], b[i])
+            if isless(exponent(a, i), exponent(b, i))
                 return true
-            elseif isless(b[i], a[i])
+            elseif isless(exponent(b, i), exponent(a, i))
                 return false
             end
         end
@@ -109,7 +109,7 @@ max(m::MonomialOrder, x, y) = Base.Order.lt(m, x, y) ? y : x
 min(m::MonomialOrder, a, b, c, xs...) = (op(x,y) = min(m,x,y); Base.afoldl(op, op(op(a,b),c), xs...))
 max(m::MonomialOrder, a, b, c, xs...) = (op(x,y) = max(m,x,y); Base.afoldl(op, op(op(a,b),c), xs...))
 function findmin(order::MonomialOrder, iter)
-    p = pairs(a)
+    p = pairs(iter)
     y = iterate(p)
     if y === nothing
         throw(ArgumentError("collection must be non-empty"))
@@ -129,7 +129,7 @@ function findmin(order::MonomialOrder, iter)
     return (m, mi)
 end
 function findmax(order::MonomialOrder, iter)
-    p = pairs(a)
+    p = pairs(iter)
     y = iterate(p)
     if y === nothing
         throw(ArgumentError("collection must be non-empty"))

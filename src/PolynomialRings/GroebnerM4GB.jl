@@ -2,23 +2,38 @@ module GröbnerM4GB
 
 
 import PolynomialRings
-import Base.Iterators: flatten
 
-import DataStructures: DefaultDict, SortedSet
-import DataStructures: PriorityQueue, enqueue!, dequeue_pair!, SortedSet
+import DataStructures: OrderedDict, SortedDict, DefaultDict
+import DataStructures: PriorityQueue, enqueue!, dequeue_pair!
 import InPlace: @inplace
-import SparseArrays: issparse
 
-import ..Backends.Gröbner: M4GB
+import ..Backends.Gröbner: M4GB, GWV
+import ..Constants: One, Zero
+import ..IndexedMonomials: ByIndex, IndexedMonomial
 import ..Modules: AbstractModuleElement, modulebasering, Signature, leading_row
+import ..MonomialIterators: monomialiter
 import ..MonomialOrderings: MonomialOrder, @withmonomialorder
-import ..Monomials: AbstractMonomial
+import ..Monomials: AbstractMonomial, total_degree, lcm_degree, num_variables
+import ..NamingSchemes: namingscheme
 import ..Operators: integral_fraction
-import ..Polynomials: Polynomial, nzterms, nztailterms, nzrevterms
-import ..Terms: monomial, coefficient
-import ..Util: @showprogress
+import ..Polynomials: Polynomial, nzterms, nztailterms, nzrevterms, leading_monomial
+import ..Terms: monomial, coefficient, Term
+import ..Util: @showprogress, interval, last_, chain, nzpairs
 import PolynomialRings: gröbner_basis, monomialtype, base_extend
-import PolynomialRings: maybe_div, divides, termtype, lcm_multipliers
+import PolynomialRings: maybe_div, divides, termtype, lcm_multipliers, mutuallyprime
+
+const lr = leading_row
+
+mutable struct LType{R, LM}
+    multiples  :: Vector{LM}
+    superseded :: Bool
+end
+
+mutable struct MType{R, LM}
+    f             :: Union{Nothing, R}
+    multiple_of   :: LM
+    reduced_until :: LM
+end
 
 """
     gröbner_basis = m4gb(monomialorder, polynomials)
@@ -31,129 +46,68 @@ function m4gb(order::MonomialOrder, F::AbstractVector{<:AbstractModuleElement})
 
     R = eltype(F)
     A = modulebasering(R)
-    LM = monomialtype(eltype(F))
-    L, M = SortedSet{LM}(order), Dict{LM, R}()
-    MM = DefaultDict{LM, SortedSet{R, typeof(order)}}(() -> SortedSet{R}(order))
+    LM = monomialtype(R)
+    Ix = keytype(R)
+    MDict = SortedDict{LM, Union{Nothing, MType{R, LM}}, typeof(order)}
+
+    L = OrderedDict{LM, LType{R, LM}}()
+    M = DefaultDict{Ix, MDict}(() -> MDict(order))
     P = PriorityQueue{Tuple{LM, LM}, LM}(order)
 
-    @showprogress "Gröbner: preparing inputs: " for f in F
-        f = mulfullreduce!(L, M, MM, one(termtype(A)), f, order)
+    F = copy(F)
+    sort!(F, order=order, rev=true)
+    filter!(!iszero, F)
+
+    for f in F
+        ensure_reducers_materialized!(M, L, One(), f, order)
+    end
+    @showprogress "Gröbner: preparing inputs: " L M P for f in F
+        f = mulfullreduce!(L, M, one(termtype(A)), f, order)
         if !iszero(f)
-            updatereduce!(L, M, MM, P, f, order)
+            lazyupdatereduce!(L, M, P, f, order)
         end
     end
-    @showprogress "Computing Gröbner basis: " while !isempty(P)
-        ((fₗₘ, gₗₘ), _) = select!(P)
-        f = M[fₗₘ]; g = M[gₗₘ]
-
+    @showprogress "Computing Gröbner basis: " L M P while !isempty(P)
+        ((fₗₘ, gₗₘ), lcm_p) = select!(P)
+        f = M[lr(fₗₘ)][fₗₘ].f
+        g = M[lr(gₗₘ)][gₗₘ].f
         c_f, c_g = lcm_multipliers(lt(f), lt(g))
-        h₁ = mulfullreduce!(L, M, MM, c_f, tail(f), order)
-        h₂ = mulfullreduce!(L, M, MM, c_g, tail(g), order)
+
+        if R <: Polynomial
+            # For modules, calling this once every loop is not good
+            # enough. That's why we only call it here for polynomials,
+            # while for modules, we call it inside getreductor!.
+            # (Technically, this depends on whether the monomial order
+            # is isomorphic to ω or e.g. ω + ω. TODO: find a more
+            # concise way of representing this difference.)
+            ensure_reducers_materialized!(M, L, monomial(c_f), f, order)
+            ensure_reducers_materialized!(M, L, monomial(c_g), g, order)
+        end
+
+        h₁ = mulfullreduce!(L, M, c_f, tail(f), order)
+        h₂ = mulfullreduce!(L, M, c_g, tail(g), order)
         if (h = h₁ - h₂) |> !iszero
-            updatereduce!(L, M, MM, P, h, order)
+            lazyupdatereduce!(L, M, P, h, order)
         end
     end
 
-    return [M[fₗₘ] for fₗₘ in L]
+    return [M[lr(fₗₘ)][fₗₘ].f for (fₗₘ, l) in pairs(L) if !l.superseded]
 end
 
 select!(P) = dequeue_pair!(P)
 
-tailterms_divisible_by(p::Polynomial, m::AbstractMonomial, order) = (
-    t
-    for t in nztailterms(p, order=order) if
-    divides(m, monomial(t))
-)
-
-function tailterms_divisible_by(p::AbstractArray{<:Polynomial}, m::Signature, order)
-    iszero(p, m.i) && return ()
-
-    l = leading_row(p)
-    row = m.i
-    if m.i == l
-        return (
-            Signature(m.i, t)
-            for t in nztailterms(p[m.i], order=order) if
-            divides(m.m, monomial(t))
-        )
-    elseif m.i > l
-        return (
-            Signature(m.i, t)
-            for t in nzrevterms(p[m.i], order=order) if
-            divides(m.m, monomial(t))
-        )
-    else
-        return ()
-    end
-end
-
-function update_with(M, H, lm_H, fₗₘ, order)
+function lazyupdatereduce!(L, M, P, f, order)
     @withmonomialorder order
 
-    max = nothing
-    for h in flatten((values(M), H))
-        for t in tailterms_divisible_by(h, fₗₘ, order)
-            if max !== nothing && monomial(t) ⪯ max
-                break
-            end
-            if monomial(t) ∉ lm_H
-                max = monomial(t)
-                break
-            end
-        end
-    end
-    return max
+    M[lr(f)][lm(f)] = MType(f // lc(f), lm(f), lm(f))
+    update!(L, M, P, lm(f), order)
 end
 
-function updatereduce!(L, M, MM, P, f, order)
-    @withmonomialorder order
-
-    H = [f // lc(f)]
-    lm_H = Set(lm(h) for h in H)
-
-    while (u = update_with(M, H, lm_H, lm(f), order)) != nothing
-        h = mulfullreduce!(L, M, MM, maybe_div(u, lm(f)) * inv(lc(f)), tail(f), order)
-        @inplace h += u
-        push!(H, h)
-        push!(lm_H, lm(h))
-    end
-
-    sort!(H, order=order)
-    while !isempty(H)
-        h = popfirst!(H)
-        for g in H
-            if (c = g[lm(h)]) |> !iszero
-                @. g -= c * h
-            end
-        end
-        for g in (issparse(f) ? MM[lm(h)] : values(M))
-            if (c = g[lm(h)]) |> !iszero
-                @. g -= c * h
-                if issparse(f)
-                    for t in nzterms(h, order=order)
-                        push!(MM[monomial(t)], g)
-                    end
-                end
-            end
-        end
-        M[lm(h)] = h
-        if issparse(f)
-            for t in nzterms(h, order=order)
-                push!(MM[monomial(t)], h)
-            end
-        end
-    end
-    update!(L, P, lm(f), order)
-end
-
-mutuallyprime(a, b) = lcm(a, b) == a * b
-mutuallyprime(a::Signature, b::Signature) = a.i == b.i ? mutuallyprime(a.m, b.m) : nothing
-
-function update!(L, P, fₗₘ, order)
+function update!(L, M, P, fₗₘ, order)
     @withmonomialorder order
 
     C = similar(P)
-    for gₗₘ in L
+    for (gₗₘ, _) in pairs(L)
         if (u = lcm(fₗₘ, gₗₘ)) |> !isnothing
             enqueue!(C, (fₗₘ, gₗₘ), u)
         end
@@ -161,40 +115,47 @@ function update!(L, P, fₗₘ, order)
     D = similar(C)
     while !isempty(C)
         ((fₗₘ, gₗₘ), u) = select!(C)
-        if mutuallyprime(fₗₘ, gₗₘ) || !any(flatten((pairs(C), pairs(D)))) do pair
+        if mutuallyprime(fₗₘ, gₗₘ) || !any(chain(pairs(C), pairs(D))) do pair
             (_, lcm_p) = pair
             divides(lcm_p, u)
         end
             enqueue!(D, (fₗₘ, gₗₘ), u)
         end
     end
-    P_new = filter!(D) do pair
-        (p1, p2), _ = pair
-        !mutuallyprime(p1, p2)
+    filter!(D) do pair
+        (p1_, p2_), _ = pair
+        !mutuallyprime(p1_, p2_)
     end
-    for ((p1, p2), lcm_p) in pairs(P)
-        if !divides(fₗₘ, lcm_p) ||
-            lcm(p1, fₗₘ) == lcm_p ||
-            lcm(p2, fₗₘ) == lcm_p
-            enqueue!(P_new, (p1, p2), lcm_p)
-        end
+    filter!(P) do pair
+        (p1, p2), lcm_p = pair
+
+        !divides(fₗₘ, lcm_p) ||
+        lcm(p1, fₗₘ) == lcm_p ||
+        lcm(p2, fₗₘ) == lcm_p
     end
-    empty!(P)
-    for ((p1, p2), lcm_p) in pairs(P_new)
+    for ((p1, p2), lcm_p) in pairs(D)
         p = p1 ≺ p2 ? (p1, p2) : (p2, p1)
         enqueue!(P, p, lcm_p)
     end
-    filter!(l -> !divides(fₗₘ, l), L)
-    push!(L, fₗₘ)
+    for (gₗₘ, l) in pairs(L)
+        if divides(fₗₘ, gₗₘ)
+            l.superseded = true
+            for m in l.multiples
+                M[lr(m)][m].multiple_of = fₗₘ
+            end
+        end
+    end
+    multiples = materialize_multiples!(M, fₗₘ, order=order)
+    L[fₗₘ] = valtype(L)(multiples, false)
 end
 
-function mulfullreduce!(L, M, MM, t, f, order)
+function mulfullreduce!(L, M, t, f, order)
     @withmonomialorder order
 
     h = zero(f)
     for s in nzterms(f, order=order)
         r = t * s
-        g = getreductor!(M, MM, L, r, order)
+        g = getreductor!(M, L, monomial(r), order)
         if g != nothing
             d = coefficient(r) // lc(g)
             h .-= d .* tail(g)
@@ -206,41 +167,129 @@ function mulfullreduce!(L, M, MM, t, f, order)
     return h
 end
 
-function getreductor!(M, MM, L, r, order)
+Something(::Type{Union{Nothing, T}}) where T = T
+
+function materialize_multiples!(M, fₗₘ; order)
     @withmonomialorder order
 
-    if monomial(r) in keys(M)
-        return M[monomial(r)]
-    else
-        fₗₘ = reducesel(L, monomial(r))
-        fₗₘ == nothing && return nothing
-        f = M[fₗₘ]
-        h = mulfullreduce!(L, M, MM, maybe_div(r, lt(f)), tail(f), order)
-        @inplace h += r
-        M[lm(h)] = h
-        if issparse(f)
-            for t in nzterms(h, order=order)
-                push!(MM[monomial(t)], h)
+    MonomialType = fₗₘ isa Signature ?
+                   typeof(fₗₘ.m) :
+                   typeof(fₗₘ)
+
+    Mᵣ = M[lr(fₗₘ)]
+    isempty(Mᵣ) && return
+
+    materialize_until = max(order, fₗₘ, last(Mᵣ)[1])
+
+    multiples = typeof(fₗₘ)[]
+    for m in monomialiter(MonomialType)
+        n = m * fₗₘ
+        n ≻ materialize_until && break
+        if isnothing(Mᵣ[n])
+            Mᵣ[n] = Something(valtype(Mᵣ))(nothing, fₗₘ, fₗₘ)
+            push!(multiples, n)
+        elseif Mᵣ[n].multiple_of == fₗₘ
+            push!(multiples, n)
+        end
+    end
+    return multiples
+end
+
+_linearly_dependent_monomials(m::AbstractMonomial) = monomialiter(typeof(m))
+_linearly_dependent_monomials(s::Signature) = (
+    Signature(s.i, m)
+    for m in monomialiter(typeof(s.m))
+)
+
+_enumerate_lms_of_rows(order, f::Polynomial) = (leading_monomial(f, order=order),)
+_enumerate_lms_of_rows(order, f::AbstractArray{<:Polynomial}) = (
+    Signature(i, leading_monomial(f_i, order=order))
+    for (i, f_i) in nzpairs(f)
+)
+_enumerate_lms_of_rows(order, f::Signature) = (f,)
+_enumerate_lms_of_rows(order, f::AbstractMonomial) = (f,)
+
+function ensure_reducers_materialized!(M, L, factor, f, order)
+    @withmonomialorder order
+
+    dirty = Set{keytype(M)}()
+
+    for gₗₘ in _enumerate_lms_of_rows(order, f)
+        materialize_until = factor * gₗₘ
+        Mᵣ = M[lr(gₗₘ)]
+
+        if !isempty(Mᵣ)
+            cur, _ = last(Mᵣ)
+            materialize_until ⪯ cur && continue
+            if materialize_until isa IndexedMonomial
+                # use Fibonacci growth for online resizing of the
+                # materialized leading monomials.
+                materialize_until = typeof(materialize_until)(ByIndex(), materialize_until.ix + cur.ix)
             end
         end
-        return h
+
+        for m in _linearly_dependent_monomials(materialize_until)
+            m ≻ materialize_until && break
+            if m ∉ keys(Mᵣ)
+                Mᵣ[m] = nothing
+                push!(dirty, lr(gₗₘ))
+            end
+        end
+    end
+
+    if !isempty(dirty)
+        for (fₗₘ, l) in pairs(L)
+            l.superseded && continue
+            lr(fₗₘ) ∈ dirty || continue
+            l.multiples = materialize_multiples!(M, fₗₘ, order=order)
+        end
     end
 end
 
-function reducesel(L, m)
-    for l in L
-        divides(l, m) && return l
+function getreductor!(M, L, gₗₘ, order)
+    @withmonomialorder order
+
+    if gₗₘ isa Signature
+        # For modules, calling this once every loop is not good
+        # enough.
+        ensure_reducers_materialized!(M, L, One(), gₗₘ, order)
     end
-    return nothing
+
+    m = M[lr(gₗₘ)][gₗₘ]
+    isnothing(m) && return nothing
+
+    if isnothing(m.f)
+        fₗₘ = m.multiple_of
+        f = M[lr(fₗₘ)][fₗₘ].f
+        m.f = mulfullreduce!(L, M, maybe_div(gₗₘ, lm(f)), tail(f), order)
+        @inplace m.f += gₗₘ * inv(lc(f))
+        m.reduced_until = last_(L)
+    end
+
+    g₀ = m.f
+    for (fₗₘ, l) in interval(L, m.reduced_until, lo=:exclusive)
+        l.superseded && continue
+        fₗₘ ≺ gₗₘ || continue
+        for m in l.multiples
+            if (c = get(g₀, m, Zero())) |> !iszero
+                m == gₗₘ && break
+                h = getreductor!(M, L, m, order)
+                d = c // lc(h)
+                @. g₀ -= d * h
+            end
+        end
+    end
+    m.reduced_until = last_(L)
+
+    return m.f
 end
+
 
 function gröbner_basis(::M4GB, o::MonomialOrder, G::AbstractArray{<:AbstractModuleElement}; kwds...)
+    num_variables(namingscheme(o)) < Inf || return gröbner_basis(GWV(), o, G)
     G = base_extend.(G)
     isempty(G) && return copy(G)
     return m4gb(o, G, kwds...)
 end
-
-# Temporary until the branch with dense polynomials gets merged
-issparse(::Polynomial) = true
 
 end

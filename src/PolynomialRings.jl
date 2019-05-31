@@ -7,12 +7,15 @@ include("PolynomialRings/Backends.jl")
 include("PolynomialRings/NamingSchemes.jl")
 include("PolynomialRings/Monomials.jl")
 include("PolynomialRings/MonomialOrderings.jl")
+include("PolynomialRings/IndexedMonomials.jl")
+include("PolynomialRings/MonomialIterators.jl")
 include("PolynomialRings/Terms.jl")
 include("PolynomialRings/Polynomials.jl")
 include("PolynomialRings/Constants.jl")
 include("PolynomialRings/Broadcast.jl")
 include("PolynomialRings/Operators.jl")
 include("PolynomialRings/NamedPolynomials.jl")
+include("PolynomialRings/DensePolynomials.jl")
 include("PolynomialRings/Expansions.jl")
 include("PolynomialRings/Arrays.jl")
 include("PolynomialRings/Display.jl")
@@ -28,14 +31,14 @@ include("PolynomialRings/Solve.jl")
 import .Monomials: TupleMonomial, VectorMonomial
 import .Terms: Term
 import .Polynomials: Polynomial, generators, polynomial_ring
-import .Expansions: expansion, @expansion, @expand, coefficient, @coefficient, constant_coefficient, @constant_coefficient, coefficients, @coefficients, linear_coefficients, @linear_coefficients, deg, @deg, expansion_terms, @expansion_terms
+import .Expansions: @expansion, @expand, coefficient, @coefficient, constant_coefficient, @constant_coefficient, coefficients, @coefficients, linear_coefficients, @linear_coefficients, deg, @deg, expansion_terms, @expansion_terms
 import .Arrays: flat_coefficients, @flat_coefficients
 import .Operators: content, common_denominator, integral_fraction, map_coefficients
 import .Solve: matrix_solve_affine
 import .NamedPolynomials: minring, ofminring
 
 export TupleMonomial, Term, Polynomial, generators, ⊗, polynomial_ring, variablesymbols
-export expansion, @expansion, @expand, coefficient, @coefficient, constant_coefficient, @constant_coefficient, expansion_terms, @expansion_terms
+export expansion, expand, @expansion, @expand, coefficient, @coefficient, constant_coefficient, @constant_coefficient, expansion_terms, @expansion_terms
 export coefficients, @coefficients, linear_coefficients, @linear_coefficients
 export deg, @deg
 export flat_coefficients, @flat_coefficients

@@ -47,6 +47,8 @@ allvariablesymbols(::Type) = Set()
 # Polynomial/term/monomial operations
 #
 # -----------------------------------------------------------------------------
+function expand end
+function expansion end
 function nzterms end
 function leading_term end
 function leading_monomial end
@@ -56,6 +58,7 @@ function maybe_div end
 function divides end
 function lcm_multipliers end
 function lcm_degree end
+function mutuallyprime end
 function leaddiv end
 function leadrem end
 function leaddivrem end

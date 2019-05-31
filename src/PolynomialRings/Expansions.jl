@@ -8,13 +8,13 @@ import IterTools: groupby
 
 import ..Constants: One
 import ..MonomialOrderings: MonomialOrder, NamedMonomialOrder, NumberedMonomialOrder
-import ..Monomials: AbstractMonomial, TupleMonomial, exptype, expstype, enumeratenz
+import ..Monomials: AbstractMonomial, TupleMonomial, exptype, expstype, enumeratenz, total_degree, exponents
 import ..NamedPolynomials: NamedPolynomial, _lossy_convert_monomial
 import ..Polynomials: Polynomial, termtype, monomialtype, monomialorder, polynomial_ring, PolynomialBy
 import ..Terms: Term, monomial, coefficient
 import ..Util: SingleItemIter
 import ..NamingSchemes: Named, Numbered, NamingScheme, remove_variables
-import PolynomialRings: basering, namingscheme, variablesymbols
+import PolynomialRings: basering, namingscheme, variablesymbols, expansion, expand
 
 # -----------------------------------------------------------------------------
 #
@@ -22,11 +22,7 @@ import PolynomialRings: basering, namingscheme, variablesymbols
 #
 # -----------------------------------------------------------------------------
 
-_expansion_expr(vars::NTuple{N,Symbol}) where N = MonomialOrder{:degrevlex, Named{vars}}()
-_expansion_expr(vars::Tuple{Expr}) = (v = vars[1]; @assert(v.head == :ref && length(v.args) == 1); MonomialOrder{:degrevlex, Numbered{v.args[1], Inf}}())
-
-
-function _expansion_types(::Type{P}, order::MonomialOrder) where P <: NamedPolynomial
+function expansiontypes(::Type{P}, order::MonomialOrder) where P <: Polynomial
     C = remove_variables(P, namingscheme(order))
     M = monomialtype(order, exptype(P, namingscheme(order)))
     return M, C
@@ -35,12 +31,12 @@ end
 _expansionspec(sym::Symbol...) = _expansionspec(Named{sym}())
 _expansionspec(scheme::NamingScheme) = _expansionspec(MonomialOrder{:degrevlex, typeof(scheme)}())
 _expansionspec(spec::MonomialOrder) = spec
-_coefftype(::Type{P}, spec...) where P <: Polynomial = remove_variables(P, namingscheme(_expansionspec(spec...)))
+_coefftype(::Type{P}, spec...) where P <: Polynomial = expansiontypes(P, _expansionspec(spec...))[2]
 
 """
     expansion(f, symbol, [symbol...])
 
-Return a collection of (exponent_tuple, coefficient) tuples decomposing f
+Return a collection of (monomial, coefficient) tuples decomposing f
 into its consituent parts.
 
 In the REPL, you likely want to use the friendlier version `@expansion` instead.
@@ -53,61 +49,75 @@ julia> R = @ring! ℤ[x,y];
 
 julia> collect(expansion(x^3 + y^2, :y))
 2-element Array{Tuple{Tuple{Int16},ℤ[x]},1}:
- ((0,), x^3)
- ((2,), 1)
+ (1, x^3)
+ (y^2, 1)
 
 julia> collect(expansion(x^3 + y^2, :x, :y))
 2-element Array{Tuple{Tuple{Int16,Int16},BigInt},1}:
- ((0, 2), 1)
- ((3, 0), 1)
+ (y^2, 1)
+ (x^3, 1)
 ```
 # See also
 `@expansion(...)`, `@coefficient` and `coefficient`
 """
-expansion(p::Polynomial, spec...) = [(m.e, c) for (c,(m,)) in _expansion2(p, _expansionspec(spec...))]
+expand(p, spec...) = (
+    (exponents(m), c)
+    for (m, c) in expansion(p, spec...)
+)
 
-_expansion2(p) = [(p, tuple())]
-# TODO: this does not respect the exptype for one(monomialtype(spec)), but
-# I also run into issues when I try to make it do that.
-_expansion2(p, spec::MonomialOrder, specs::MonomialOrder...) = (((c, ms),) = _expansion2(p, specs...); [(c, tuple(one(monomialtype(spec)), ms...))])
-# TODO: should we return owned copies?
-_expansion2(p::PolynomialBy{Order}, spec::Order) where Order <: MonomialOrder = ((c, (m,)) for (m, c) in pairs(p, order=Order()))
+"""
+    expansion(f, symbol, [symbol...])
+
+Return a collection of (monomial, coefficient) tuples decomposing f
+into its consituent parts.
+
+In the REPL, you likely want to use the friendlier version `@expansion` instead.
+
+# Examples
+```jldoctest
+julia> using PolynomialRings
+
+julia> R = @ring! ℤ[x,y];
+
+julia> collect(expansion(x^3 + y^2, :y))
+2-element Array{Tuple{Tuple{Int16},ℤ[x]},1}:
+ (1, x^3)
+ (y^2, 1)
+
+julia> collect(expansion(x^3 + y^2, :x, :y))
+2-element Array{Tuple{Tuple{Int16,Int16},BigInt},1}:
+ (y^2, 1)
+ (x^3, 1)
+```
+# See also
+`@expansion(...)`, `@coefficient` and `coefficient`
+"""
+expansion(p::Polynomial, spec...) = expansion(p, _expansionspec(spec...))
+expansion(p::Number, spec...) = ((one(monomialtype(spec...)), p),)
+
 _ofpolynomialtype(m::AbstractMonomial, c) = _ofpolynomialtype(Term(m, c))
 _ofpolynomialtype(m, c) = m * c
 _ofpolynomialtype(t::Term{M,C}) where {M,C} = Polynomial(M[monomial(t)], C[coefficient(t)])
-function _expansion2(p::Polynomial, spec::MonomialOrder)
+function expansion(p::Polynomial, spec::MonomialOrder)
     C = remove_variables(typeof(p), namingscheme(spec))
     M = monomialtype(spec, exptype(typeof(p), namingscheme(spec)))
     M′ = remove_variables(monomialtype(p), namingscheme(spec))
-    exploded = Tuple{C, Tuple{M}}[
+    exploded = Tuple{M, C}[
         (
             m = _lossy_convert_monomial(M, m1);
             m′ = _lossy_convert_monomial(M′, m1);
             c′ = _ofpolynomialtype(m′, c);
-            (c′, (m * m2,))
+            (m * m2, c′)
         )
-        for (m1, c1) in pairs(p)
-        for (c, (m2,)) in _expansion2(c1, spec)
+        for (m1, c1) in expansion(p, monomialorder(p))
+        for (m2,  c) in expansion(c1, spec)
     ]
-    sort!(exploded, by = i -> i[2])
+    sort!(exploded, by = i -> i[1])
     collected = [
-        (sum(i -> i[1], grp), grp[1][2])
-        for grp in groupby(i -> i[2], exploded)
+        (grp[1][1], sum(i -> i[2], grp))
+        for grp in groupby(i -> i[1], exploded)
     ]
     return collected
-end
-
-_monomialtypes(P::Type{<:Polynomial}, spec::MonomialOrder) = tuple(monomialtype(spec, exptype(P, namingscheme(spec))))
-_monomialtypes(P::Type{<:Polynomial}, spec::MonomialOrder, specs::MonomialOrder...) = tuple(_monomialtypes(P, spec)..., _monomialtypes(P, specs...)...)
-_remove_variables(t::Type) = t
-_remove_variables(t::Type, spec::MonomialOrder, specs::MonomialOrder...) = _remove_variables(remove_variables(t, namingscheme(spec)), specs...)
-function _expansion2(p::Polynomial, spec::MonomialOrder, specs::MonomialOrder...)
-    C = _remove_variables(typeof(p), spec, specs...)
-    return Tuple{C, Tuple{_monomialtypes(typeof(p), spec, specs...)...}}[
-        (c2, tuple(m, ms...))
-        for (c1, ms) in _expansion2(p, specs...)
-        for (c2, (m,)) in _expansion2(c1, spec)
-    ]
 end
 
 # -----------------------------------------------------------------------------
@@ -141,7 +151,7 @@ julia> collect(coefficients(x^3 + y^2, :x, :y))
 `@coefficients`, `@expansion`, `expansion`, `@coefficient` and `coefficient`
 """
 function coefficients(p::P, spec...) where P <: Polynomial
-    return [c for (p,c) in expansion(p, spec...)]
+    return [c for (_,c) in expansion(p, spec...)]
 end
 
 """
@@ -168,11 +178,11 @@ julia> collect(expansion_terms(x^3 + y^2 + 1, :x, :y))
 function expansion_terms(p::P, spec...) where P <: Polynomial
     return [
         _ofpolynomialtype(m * c)
-        for (m,c) in _expansion2(p, spec...)
+        for (m,c) in expansion(p, spec...)
     ]
 end
 
-@inline _expansion_types(t::Type, variables::Symbol...) = _expansion_types(t, _expansionspec(variables...))
+@inline expansiontypes(t::Type, variables::Symbol...) = expansiontypes(t, _expansionspec(variables...))
 
 _substitute(p::Polynomial, names::Named, values...) = _substitute(p, names, promote(values...)...)
 
@@ -184,8 +194,8 @@ function _substitute(p::Polynomial, names::Named, values::SubstitutionType...) w
     return reduce(
         +,
         (
-            reduce(*, (v^k for (v,k) in zip(values,w)), init=c)
-            for (w,c) in expansion(p, MonomialOrder{:degrevlex, typeof(names)}())
+            reduce(*, (values[i]^exponent(m, i) for i=1:length(values)), init=c)
+            for (m, c) in expansion(p, MonomialOrder{:degrevlex, typeof(names)}())
         ),
         init=zero(ReturnType)
     )::ReturnType
@@ -201,7 +211,7 @@ function _substitute(p::Polynomial, names::Numbered, valuesfunc)
         +,
         (
             reduce(*, (valuesfunc(i)^k for (i,k) in enumeratenz(m)), init=c)
-            for (c,(m,)) in _expansion2(p, MonomialOrder{:degrevlex, typeof(names)}())
+            for (m, c) in expansion(p, MonomialOrder{:degrevlex, typeof(names)}())
         ),
         init=zero(ReturnType)
     )::ReturnType
@@ -291,7 +301,7 @@ julia> coefficient(x^3*y + x, (3,1), :x, :y)
 """
 function coefficient(f::Polynomial, t::Tuple, vars...)
     for (w,p) in expansion(f, vars...)
-        if w == t
+        if all(exponent(w, i) == t[i] for i=1:length(t))
             return p
         end
     end
@@ -302,7 +312,7 @@ function coefficient(f::Polynomial, t::Polynomial, vars...)
     ((w,p),) = expansion(t, vars...)
     p == 1 || throw(ArgumentError("Cannot get a coefficient for $t when symbols are $vars"))
 
-    coefficient(f, w, vars...)
+    coefficient(f, w.e, vars...)
 end
 
 """
@@ -330,7 +340,7 @@ julia> constant_coefficient(x^3*y + x + y + 1, :x, :y)
 """
 function constant_coefficient(f::Polynomial, vars...)
     for (w,p) in expansion(f, vars...)
-        if sum(w) == 0
+        if isone(w)
             return p
         end
     end
@@ -368,8 +378,8 @@ linear_coefficients(f::Polynomial, spec...) = linear_coefficients(f, _expansions
 function linear_coefficients(f::Polynomial, spec::NamedMonomialOrder)
     res = zeros(_coefftype(typeof(f), spec), length(variablesymbols(spec)))
     for (w, p) in expansion(f, spec)
-        if sum(w) == 1
-            res[findfirst(!iszero,w)] = p
+        if total_degree(w) == 1
+            res[findfirst(!iszero,w.e)] = p
         end
     end
 
@@ -379,8 +389,8 @@ end
 function linear_coefficients(f::Polynomial, spec::NumberedMonomialOrder)
     res = spzeros(_coefftype(typeof(f), spec), 0)
     for (w, p) in expansion(f, spec)
-        if sum(w) == 1
-            ix = findfirst(!iszero,w)
+        if total_degree(w) == 1
+            ix = findfirst(!iszero,w.e)
             newlength = max(ix, length(res))
             # there is no resize!() because SparseVector is an
             # immutable struct
@@ -415,7 +425,7 @@ julia> deg(x^2, :y)
 """
 function deg(f::Polynomial, args...)
     iszero(f) && return -1
-    return maximum(sum(w) for (w,p) in expansion(f, args...))
+    return maximum(total_degree(w) for (w,p) in expansion(f, args...))
 end
 
 # -----------------------------------------------------------------------------
@@ -423,6 +433,10 @@ end
 # Helper functions for some of the macros below
 #
 # -----------------------------------------------------------------------------
+
+_expansion_expr(vars::NTuple{N,Symbol}) where N = MonomialOrder{:degrevlex, Named{vars}}()
+_expansion_expr(vars::Tuple{Expr}) = (v = vars[1]; @assert(v.head == :ref && length(v.args) == 1); MonomialOrder{:degrevlex, Numbered{v.args[1], Inf}}())
+
 
 function _parse_monomial_expression(expr)
     if expr isa Symbol
@@ -556,38 +570,6 @@ end
 """
     @expansion(f, var, [var...])
 
-Return a collection of (exponent tuple, coefficient) tuples decomposing f
-into its consituent parts.
-
-# Examples
-```jldoctest
-julia> using PolynomialRings
-
-julia> R = @ring! ℤ[x,y];
-
-julia> collect(@expansion(x^3 + y^2, y))
-2-element Array{Tuple{Tuple{Int16},ℤ[x]},1}:
- ((0,), x^3)
- ((2,), 1)
-
-julia> collect(@expansion(x^3 + y^2, x, y))
-2-element Array{Tuple{Tuple{Int16,Int16},BigInt},1}:
- ((0, 2), 1)
- ((3, 0), 1)
-```
-# See also
-`@expand`, `expansion(...)`, `@coefficient` and `coefficient`
-"""
-macro expansion(f, symbols...)
-    expansion_expr = _expansion_expr(symbols)
-    quote
-        expansion($(esc(f)), $expansion_expr)
-    end
-end
-
-"""
-    @expand(f, var, [var...])
-
 Return a collection of (monomial, coefficient) tuples decomposing f
 into its consituent parts.
 
@@ -610,14 +592,42 @@ julia> collect(@expand(x^3 + y^2, x, y))
 # See also
 `expansion(...)`, `@coefficient` and `coefficient`
 """
+macro expansion(f, symbols...)
+    expansion_expr = _expansion_expr(symbols)
+    quote
+        expansion($(esc(f)), $expansion_expr)
+    end
+end
+
+"""
+    @expand(f, var, [var...])
+
+Return a collection of (exponent tuple, coefficient) tuples decomposing f
+into its consituent parts.
+
+# Examples
+```jldoctest
+julia> using PolynomialRings
+
+julia> R = @ring! ℤ[x,y];
+
+julia> collect(@expand(x^3 + y^2, y))
+2-element Array{Tuple{Tuple{Int16},ℤ[x]},1}:
+ ((0,), x^3)
+ ((2,), 1)
+
+julia> collect(@expand(x^3 + y^2, x, y))
+2-element Array{Tuple{Tuple{Int16,Int16},BigInt},1}:
+ ((0, 2), 1)
+ ((3, 0), 1)
+```
+# See also
+`@expansion`, `expand(...)`, `@coefficient` and `coefficient`
+"""
 macro expand(f, symbols...)
     expansion_expr = _expansion_expr(symbols)
-    R,vars = polynomial_ring(symbols..., basering=Int)
     quote
-        [
-            (prod(v^k for (v,k) in zip($vars,w)), p)
-            for (w,p) in expansion($(esc(f)), $expansion_expr)
-        ]
+        expand($(esc(f)), $expansion_expr)
     end
 end
 

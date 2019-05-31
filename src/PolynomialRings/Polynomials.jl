@@ -1,16 +1,16 @@
 module Polynomials
 
-import Base: first, last, copy, hash, pairs
-import SparseArrays: SparseVector, HigherOrderFns
+import Base: first, last, copy, hash
+import Base: OneTo
+import SparseArrays: SparseVector, HigherOrderFns, issparse
 
 import ..MonomialOrderings: MonomialOrder
-import ..MonomialOrderings: MonomialOrder
 import ..Monomials: AbstractMonomial, TupleMonomial, VectorMonomial
-import ..Terms: Term, monomial, coefficient
 import ..NamingSchemes: Named, Numbered, NamingScheme, fullnamingscheme, isdisjoint, isvalid
+import ..Terms: Term, monomial, coefficient
 import PolynomialRings: generators, to_dense_monomials, max_variable_index, basering, monomialtype
 import PolynomialRings: leading_coefficient, leading_monomial
-import PolynomialRings: leading_term, termtype, monomialorder, nzterms, exptype, namingscheme
+import PolynomialRings: leading_term, termtype, monomialorder, nzterms, exptype, namingscheme, expansion
 import PolynomialRings: tail
 import PolynomialRings: variablesymbols, allvariablesymbols, fullboundnames
 import PolynomialRings: polynomialtype
@@ -30,11 +30,11 @@ that the vector is sorted by increasing monomial order (see
 `PolynomialRings.MonomialOrderings`).
 """
 struct Polynomial{M <: AbstractMonomial, C, MonomVector}
-    monomials::MonomVector
-    coeffs::Vector{C}
+    monomials :: MonomVector
+    coeffs    :: Vector{C}
 end
 
-Polynomial(monomials::Vector{<:AbstractMonomial}, coeffs::Vector) = Polynomial{eltype(monomials), eltype(coeffs), typeof(monomials)}(monomials, coeffs)
+Polynomial(monomials, coeffs::Vector) = Polynomial{eltype(monomials), eltype(coeffs), typeof(monomials)}(monomials, coeffs)
 
 polynomialtype(M::Type{<:AbstractMonomial}, C::Type) = Polynomial{M, C, Vector{M}}
 
@@ -48,7 +48,10 @@ const NamedOrder              = MonomialOrder{Rule,<:Named}    where Rule
 const NumberedOrder           = MonomialOrder{Rule,<:Numbered} where Rule
 const NamedMonomial           = AbstractMonomial{<:NamedOrder}
 const NumberedMonomial        = AbstractMonomial{<:NumberedOrder}
+const MonomialBy{Order}       = AbstractMonomial{Order}
 const TermOver{C,Order}       = Term{<:AbstractMonomial{Order}, C}
+const TermBy{Order,C}        = TermOver{C,Order}
+const TermIn{M}              = Term{M}
 const PolynomialOver{C,Order} = Polynomial{<:AbstractMonomial{Order}, C}
 const NamedTerm{C}            = TermOver{C,<:NamedOrder}
 const NumberedTerm{C}         = TermOver{C,<:NumberedOrder}
@@ -63,20 +66,53 @@ const PolynomialIn{M}         = Polynomial{M}
 #
 # -----------------------------------------------------------------------------
 
-isstrictlysparse(::Type{<:Polynomial}) = true
+isstrictlysparse(P::Type{<:Polynomial}) = monomialstype(P) <: Vector
 isstrictlysparse(f::Polynomial) = isstrictlysparse(typeof(f))
+issparse(P::Type{<:Polynomial}) = monomialstype(P) <: Vector
+issparse(f::Polynomial) = issparse(typeof(f))
 
-pairs(p::PolynomialBy{Order}, order::Order) where Order<:MonomialOrder = zip(p.monomials, p.coeffs)
-pairs(p::Polynomial; order::MonomialOrder=monomialorder(p)) = pairs(p, order)
+termtype(::Type{Polynomial{M,C,MV}}) where {M,C,MV}  = Term{M,C}
+monomialstype(::Type{Polynomial{M,C,MV}}) where {M,C,MV} = MV
+exptype(::Type{P}, scheme::NamingScheme...) where P<:Polynomial = exptype(termtype(P), scheme...)
+namingscheme(::Type{P}) where P<:Polynomial = namingscheme(termtype(P))
+monomialorder(::Type{P}) where P<:Polynomial = monomialorder(termtype(P))
+basering(::Type{P}) where P <: Polynomial = basering(termtype(P))
+monomialtype(::Type{P}) where P <: Polynomial = monomialtype(termtype(P))
+allvariablesymbols(::Type{P}) where P <: Polynomial = union(allvariablesymbols(basering(P)), variablesymbols(P))
+
+# -----------------------------------------------------------------------------
+#
+# Iterating over summands
+#
+# -----------------------------------------------------------------------------
+struct Expansion{P <: Polynomial}
+    p :: P
+end
+Base.iterate(ex::Expansion, state...) = iterate(zip(ex.p.monomials, ex.p.coeffs), state...)
+Base.eltype(ex::Expansion) = Tuple{monomialtype(ex.p), basering(ex.p)}
+Base.length(ex::Expansion) = length(ex.p.coeffs)
+expansion(p::PolynomialBy{Order}, order::Order) where Order<:MonomialOrder = Expansion(p)
+
+struct NZTerms{P <: Polynomial}
+    p :: P
+end
+Base.eltype(it::NZTerms) = termtype(it.p)
+Base.length(it::NZTerms) = nztermscount(it.p)
+function Base.iterate(it::NZTerms, state...)
+    zipped = zip(it.p.monomials, it.p.coeffs)
+    iter = iterate(zipped, state...)
+    while true
+        iter == nothing && return nothing
+        (m, c), state = iter
+        (isstrictlysparse(it.p) || !iszero(c)) && return Term(m, c), state
+        iter = iterate(zipped, state)
+    end
+    return nothing
+end
+nzterms(p::PolynomialBy{Order}, order::Order) where Order <: MonomialOrder = NZTerms(p)
+nzterms(p::Polynomial; order::MonomialOrder=monomialorder(p)) = nzterms(p, order)
 
 nztermscount(p::Polynomial) = isstrictlysparse(p) ? length(p.coeffs) : count(!iszero, p.coeffs)
-
-nzterms(p::PolynomialBy{Order}, order::Order) where Order <: MonomialOrder = (
-    Term(m, c)
-    for (m, c) in pairs(p, order) if
-    isstrictlysparse(p) || !iszero(c)
-)
-nzterms(p::Polynomial; order::MonomialOrder=monomialorder(p)) = nzterms(p, order)
 
 nztailterms(p::PolynomialBy{Order}; order::Order=monomialorder(p)) where Order <: MonomialOrder = (
     Term(p.monomials[ix], p.coeffs[ix])
@@ -88,14 +124,28 @@ nzrevterms(p::PolynomialBy{Order}; order::Order=monomialorder(p)) where Order <:
     for ix in reverse(1:_leading_term_ix(p, order)) if
     isstrictlysparse(p) || !iszero(p.coeffs[ix])
 )
+# -----------------------------------------------------------------------------
+#
+# Methods for collection-of-terms
+#
+# -----------------------------------------------------------------------------
+function Base.empty!(p::Polynomial)
+    empty!(p.coeffs)
+    empty!(p.monomials)
+    p
+end
 
-termtype(::Type{Polynomial{M,C,MV}}) where {M,C,MV}  = Term{M,C}
-exptype(::Type{P}, scheme::NamingScheme...) where P<:Polynomial = exptype(termtype(P), scheme...)
-namingscheme(::Type{P}) where P<:Polynomial = namingscheme(termtype(P))
-monomialorder(::Type{P}) where P<:Polynomial = monomialorder(termtype(P))
-basering(::Type{P}) where P <: Polynomial = basering(termtype(P))
-monomialtype(::Type{P}) where P <: Polynomial = monomialtype(termtype(P))
-allvariablesymbols(::Type{P}) where P <: Polynomial = union(allvariablesymbols(basering(P)), variablesymbols(P))
+function Base.push!(p::PolynomialIn{M}, t::TermIn{M}) where M <: AbstractMonomial
+    @assert isempty(p.monomials) || isless(last(p.monomials), monomial(t))
+    push!(p.monomials, monomial(t))
+    push!(p.coeffs, coefficient(t))
+    p
+end
+
+function Base.sizehint!(p::Polynomial, n)
+    sizehint!(p.coeffs, n)
+    sizehint!(p.monomials, n)
+end
 
 hash(p::Polynomial, h::UInt) = hash(p.monomials, hash(p.coeffs, h))
 
@@ -119,23 +169,81 @@ end
 leading_monomial(p::Polynomial; order::MonomialOrder=monomialorder(p)) = p.monomials[_leading_term_ix(p, order)]
 leading_coefficient(p::Polynomial; order::MonomialOrder=monomialorder(p)) = p.coeffs[_leading_term_ix(p, order)]
 
-tail(p::PolynomialBy{Order}, order::Order) where Order <: MonomialOrder = typeof(p)(p.monomials[1:end-1], p.coeffs[1:end-1])
+function tail(p::PolynomialBy{Order}, order::Order) where Order <: MonomialOrder
+    ix = _leading_term_ix(p, order)
+    typeof(p)(p.monomials[1:ix-1], p.coeffs[1:ix-1])
+end
 tail(p::Polynomial, order::MonomialOrder) = p - leading_term(p; order=order)
 tail(p::Polynomial; order::MonomialOrder=monomialorder(p)) = tail(p, order)
 
-function Base.getindex(p::PolynomialIn{M}, m::M) where M <: AbstractMonomial
+"""
+    coeff = get(p::PolynomialIn{M}, m::M, default) where M <: AbstractMonomial
+
+The coefficient of `p` at `m`, or `default` if this coefficient is zero.
+
+Typical use will have `default=zero(basering(p))`, (in which case `p[m]` is
+equivalent), but there is sometimes a distinct advantage to `default=nothing`.
+For example, when `basering(p) == BigInt`, the result `zero(BigInt)` needs
+an allocation, and that's wasteful if the caller only wants to do `iszero(...)`.
+In this situation, `isnothing(get(p, m, nothing))` is much faster.
+"""
+function Base.get(p::PolynomialIn{M}, m::M, default) where M <: AbstractMonomial
     if (range = searchsorted(p.monomials, m)) |> !isempty
         ix = first(range)
-        return p.coeffs[ix]
-    else
-        return zero(basering(p))
+        if ix <= length(p.coeffs)
+            c = p.coeffs[ix]
+            return (isstrictlysparse(p) || !iszero(c)) ? c : default
+        end
     end
+    return default
 end
 
+Base.getindex(p::PolynomialIn{M}, m::M) where M <: AbstractMonomial = get(p, m, zero(basering(p)))
+
 # match the behaviour for Number
-first(p::Polynomial) = p
-last(p::Polynomial) = p
-copy(p::Polynomial) = p
+# some code treats numbers as collection-like
+for Number in [Polynomial, Term, AbstractMonomial]
+    @eval begin
+        Base.size(x::$Number) = ()
+        Base.size(x::$Number, d::Integer) = d < 1 ? throw(BoundsError()) : 1
+        Base.axes(x::$Number) = ()
+        Base.axes(x::$Number, d::Integer) = d < 1 ? throw(BoundsError()) : OneTo(1)
+        Base.eltype(::Type{T}) where {T<:$Number} = T
+        Base.ndims(x::$Number) = 0
+        Base.ndims(::Type{<:$Number}) = 0
+        Base.length(x::$Number) = 1
+        Base.firstindex(x::$Number) = 1
+        Base.lastindex(x::$Number) = 1
+        Base.IteratorSize(::Type{<:$Number}) = HasShape{0}()
+        Base.keys(::$Number) = OneTo(1)
+
+        Base.getindex(x::$Number) = x
+        function Base.getindex(x::$Number, i::Integer)
+            Base.@_inline_meta
+            @boundscheck i == 1 || throw(BoundsError())
+            x
+        end
+        function Base.getindex(x::$Number, I::Integer...)
+            Base.@_inline_meta
+            @boundscheck all(i == 1 for i in I) || throw(BoundsError())
+            x
+        end
+        Base.first(x::$Number) = x
+        Base.last(x::$Number) = x
+        Base.copy(x::$Number) = x # some code treats numbers as collection-like
+
+        # more of the same "we're secretly a 0-dimensional container,
+        # except that these are not defined for Base.Number (but arguably
+        # they should be).
+        Base.values(x::$Number) = (x,)
+        Base.pairs(x::$Number) = ((1, x),)
+        Base.getindex(x::$Number, i::CartesianIndex{0}) = x
+        Base.keytype(x::$Number) = Int
+        Base.valtype(x::$Number) = typeof(x)
+        Base.keytype(::Type{<:$Number}) = Int
+        Base.valtype(T::Type{<:$Number}) = T
+    end
+end
 
 function Base.Order.lt(order::MonomialOrder, a::P, b::P) where P <: Polynomial
     iszero(b) && return false
