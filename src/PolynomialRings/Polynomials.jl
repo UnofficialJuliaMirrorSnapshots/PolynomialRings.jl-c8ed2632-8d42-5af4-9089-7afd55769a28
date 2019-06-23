@@ -4,6 +4,8 @@ import Base: first, last, copy, hash
 import Base: OneTo
 import SparseArrays: SparseVector, HigherOrderFns, issparse
 
+import InPlace: @inplace
+
 import ..MonomialOrderings: MonomialOrder
 import ..Monomials: AbstractMonomial, TupleMonomial, VectorMonomial
 import ..NamingSchemes: Named, Numbered, NamingScheme, fullnamingscheme, isdisjoint, isvalid
@@ -110,14 +112,13 @@ struct NZTerms{P <: Polynomial}
 end
 Base.eltype(it::NZTerms) = termtype(it.p)
 Base.length(it::NZTerms) = nztermscount(it.p)
-function Base.iterate(it::NZTerms, state...)
-    zipped = zip(it.p.monomials, it.p.coeffs)
-    iter = iterate(zipped, state...)
+function Base.iterate(it::NZTerms, state=1)
     while true
-        iter == nothing && return nothing
-        (m, c), state = iter
-        (isstrictlysparse(it.p) || !iszero(c)) && return Term(m, c), state
-        iter = iterate(zipped, state)
+        state <= length(it.p.coeffs) || return nothing
+        c = it.p.coeffs[state]
+        m = it.p.monomials[state]
+        (isstrictlysparse(it.p) || !iszero(c)) && return (Term(m, c), state + 1)
+        state += 1
     end
     return nothing
 end
@@ -143,20 +144,32 @@ nzrevterms(p::PolynomialBy{Order}; order::Order=monomialorder(p)) where Order <:
 # -----------------------------------------------------------------------------
 function Base.empty!(p::Polynomial)
     empty!(p.coeffs)
-    empty!(p.monomials)
+    p.monomials isa Vector && empty!(p.monomials)
     p
 end
 
 function Base.push!(p::PolynomialIn{M}, t::TermIn{M}) where M <: AbstractMonomial
-    @assert isempty(p.monomials) || isless(last(p.monomials), monomial(t))
-    push!(p.monomials, monomial(t))
-    push!(p.coeffs, coefficient(t))
+    if !(p.monomials isa Vector)
+        @inplace p += t
+    else
+        @assert isempty(p.monomials) || isless(last(p.monomials), monomial(t))
+        push!(p.monomials, monomial(t))
+        push!(p.coeffs, coefficient(t))
+    end
     p
 end
 
 function Base.sizehint!(p::Polynomial, n)
     sizehint!(p.coeffs, n)
-    sizehint!(p.monomials, n)
+    p.monomials isa Vector && sizehint!(p.monomials, n)
+end
+
+Base.append!(dst::Polynomial, src) = for t in src; push!(dst, t); end
+Base.copy!(dst::Polynomial, src) = append!(empty!(dst), src)
+
+function Base.copy!(dst::Polynomial, src::Polynomial)
+    copy!(dst.coeffs, src.coeffs)
+    src.monomials isa Vector && copy!(dst.monomials, src.monomials)
 end
 
 hash(p::Polynomial, h::UInt) = hash(p.monomials, hash(p.coeffs, h))
